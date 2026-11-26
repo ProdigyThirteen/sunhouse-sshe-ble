@@ -26,7 +26,7 @@ Baseline: 2026-11-25 18:12, panel showing target 20 °C, room ~17.7 °C, mode Us
 | Svc | Char | Off → 1 h → 2 h | Meaning |
 |---|---|---|---|
 | 0 | 1001 | `01 03 00 00 00 00` → `…00 01 00 00` → `…00 02 00 00` | **byte 3 = boost hours** (0 = off) |
-| 0 | 100D | `00` → `02` → `03` | boost selection. Write confirmed: 02 = 1 h, 03 = 2 h. Likely 0 = none, and 1 = Autoboost / 04 = 3 h |
+| 0 | 100D | `00` → `01` → `02` → `03` | Override selector. Confirmed: `00` none, `01` Advance, `02` Boost 1 h, `03` Boost 2 h. Write the value to set it, `00` to cancel. Advance leaves 1001 untouched; boost also sets 1001 byte 3 = hours. (`04` = 3 h likely, untested.) |
 
 ## Mode — register S0000/1001 `[01][mode][00][boost_hrs][00][00]`
 
@@ -42,7 +42,7 @@ Setpoint behaviour: entering Holiday dropped both 1003 and 1023 from `14 00` (20
 
 Register 1 / 0003 went `01 00` → `01 01` with boost but stayed `01 01` after cancelling, so it isn't the boost flag. Possibly a "something changed on the panel" marker.
 
-Cancelling (No Boost) put 1001 byte 3 and 100D back to 0. Which one to write to start a boost is untested; 100D (the selection) is the likely one.
+Cancelling (No Boost) put 1001 byte 3 and 100D back to 0. 100D is the override selector: writing `01` starts Advance (confirmed by pressing Advance on the panel — 100D went `00`→`01`, nothing else of note changed), `02`/`03` start boost.
 
 ## Open window detection (diff 2026-11-25: OW turned off)
 
