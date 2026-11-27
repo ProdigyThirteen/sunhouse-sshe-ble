@@ -1,0 +1,22 @@
+# One day of one weekly timer, as a text entry in Home Assistant. Included once per day by
+# sunhouse-heater.yaml with these variables:
+#   entry_id, entry_name   the entry's id and name
+#   timer_mode             1 Out All Day, 3 User Timer
+#   day                    0 Monday to 6 Sunday
+text:
+  - platform: template
+    id: ${entry_id}
+    name: ${entry_name}
+    icon: mdi:calendar-clock
+    entity_category: config
+    mode: text
+    max_length: 64
+    # The entry only changes when the heater's copy is read back, so it never shows a day the
+    # heater turned down.
+    optimistic: false
+    set_action:
+      - script.execute:
+          id: write_timer_day
+          timer_mode: ${timer_mode}
+          day: ${day}
+          value: !lambda "return x;"

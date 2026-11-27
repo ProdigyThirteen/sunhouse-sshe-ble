@@ -1,95 +1,129 @@
-# Sunhouse SSHE125 (Glen Dimplex) BLE register map
+# Register map
 
-Device name: `AL6053<Sunhouse>` — the Bluetooth MAC differs per unit; find yours with `bluetoothctl devices`.
+The heater advertises as `AL6053<Sunhouse>`. Pairing uses a 6-digit passkey printed on the rating label.
 
-Characteristic UUIDs are `0000XXXX-0000-1000-8000-00805f9b34fb`; services are `00000000-000N-1000-8000-00805f9b34fb` (N = 0..3).
+Services are `00000000-000N-1000-8000-00805f9b34fb` (written S0 to S3 below) and characteristics are
+`0000XXXX-0000-1000-8000-00805f9b34fb`. Nothing notifies, so everything is polled. Multi-byte values are
+little-endian.
 
-**Never write to** `00060000-f8ce-11e4-abf4-0002a5d5c51b` / `…c51c` — Cypress OTA bootloader (firmware update).
+Ask for encryption as soon as you connect. The heater refuses unencrypted reads with GATT status 15 instead
+of starting pairing itself.
 
-Baseline: 2026-11-25 18:12, panel showing target 20 °C, room ~17.7 °C, mode User Timer.
+**Don't write to `00060000-f8ce-11e4-abf4-0002a5d5c51b` or `…c51c`.** They're the Cypress firmware
+bootloader, and a stray write can leave the heater stuck until it's reflashed.
 
-## Confirmed
+## Select, then read
 
-| Svc | Char | Raw | Meaning |
+Some registers hold more than one value. Write a selector, then read the register, and the answer starts with
+the same selector. The selector stays where it was last set, so write it before every read.
+
+| Register | Write | Read back |
+|---|---|---|
+| S1/`0008` temperatures | `[N, 00, 00]`: 1 room, 2 control board, 3 storage core | `[N, °C, tenths]` |
+| S1/`0003` relays | `[N, 00]`: 1 core element, 4 boost element, 5 fan | `[N, on]`, or `00 00` if there's no such relay |
+| S1/`0002` element triacs | `[N, 00, 00]`: 1 or 2 | `[N, on, 00]` |
+| S0/`1002` weekly timers | `[00, mode, day]` | the day's 31-byte record (see below) |
+| S3/`2001` software versions | `[N, 00, 00]`: 0 control board, 1 display, 2 radio | `[N, version, 00]` |
+
+## Service 0: control
+
+| Char | Size | Access | What it is |
 |---|---|---|---|
-| 0 | 0006 | `14 1a 0b 19 12 0c 01` | Clock: century 20, year 26, month 11, day 25, 18:12, last byte 01 (DST flag or weekday?) |
-| 3 | 2005 | `SSHE125;B;` | Model string |
-| 3 | 2004 | `<Sunhouse>` | Brand |
-| 3 | 200A | `EP4078` | Part/board number |
-| 3 | 200D | `SGLHS6` | Hardware/firmware ID |
-| 3 | 2001 | `01 44 00` | 0x44 = 68 → matches `UI:068` on the info screen (UI firmware version) |
-| 0 | 1003 | `14 00` → `15 00` | **Target temperature**, °C, u16le. Panel 20 → 21 changed it (diff 2026-11-25 18:14). **Writable**: writing `16 00` (with response) read back as 22 in both 1003 and 1023, and the panel showed 22 (2026-11-25) |
-| 0 | 1023 | `14 00` → `15 00` | Changed with 1003. Probably the *active* setpoint (the one in force now) vs 1003 the comfort setting; a diff during a setback period will tell them apart |
+| `0006` | 7 | read/write | Clock: `[20][year][month][day][hour][minute][DST]`, local time, DST `01` in summer time |
+| `1001` | 6 | read/write | Control block: `[01][mode][00][boost hours][00][00]`. Mode `01` Out All Day, `02` Home All Day, `03` User Timer, `04` Holiday. Read it, change the mode byte, write it back. Writing `04` starts a one-day Holiday; `01` or `03` ends one |
+| `1002` | 31 | read/write | Weekly timers, one day at a time (see below) |
+| `1003` | 2 | read/write | Target temperature, °C, `u16`, whole degrees within the setpoint range |
+| `1004` | 4 | read/write | Holiday: byte 0 days left, byte 2 frost temperature (°C). Change byte 0 during a Holiday to move the return date |
+| `1005` | 1 | read/write | Temperature unit: `00` °C |
+| `1006` | 4 | read | Setpoint range: byte 0 minimum, byte 2 maximum (°C) |
+| `1007` | 9 | read/write | Open window detection: byte 0, `01` on, `00` off. Change only byte 0 |
+| `100D` | 1 | read/write | Override: `00` none, `01` Advance, `02` Boost 1 hour, `03` Boost 2 hours. Write `00` to cancel. A boost also shows as hours in `1001` byte 3; Advance doesn't touch `1001` |
+| `1011` | 1 | read | Fault code (table below) |
+| `1016` | 2 | read/write | Setback: `[on][°C]` |
+| `1023` | 2 | read | Setpoint in force, °C, `u16`. Follows `1003`, and drops to the frost temperature during a Holiday |
 
-## Boost (diff 2026-11-25 18:20: Boost 1 hour turned on from the panel)
+### Weekly timers (`1002`)
 
-| Svc | Char | Off → 1 h → 2 h | Meaning |
+Each mode has its own week: `01` Out All Day, `02` Home All Day, `03` User Timer. Days run from `00` Monday to
+`06` Sunday. A day is a 31-byte record:
+
+```
+[rw][mode][day]
+[start h][start m][end h][end m][°C][00]   x 4 periods
+[00][00][00][00]
+```
+
+To read a day, write `[00, mode, day]` and then read the 31 bytes; `rw` reads back as `00`. To write
+one, send the whole record with `rw` set to `01`.
+
+A day has room for four periods, in order, not overlapping, and inside the day (`23:59` stands for
+midnight). The spare ones still have to be filled in. In an empty day all four have zero times and
+21 °C; otherwise each spare period starts and ends at the last real period's end time, with 21 °C.
+
+Each period also stores a temperature. Keep whatever the heater had there, or write 21.
+
+## Service 1: live status
+
+| Char | Size | Access | What it is |
 |---|---|---|---|
-| 0 | 1001 | `01 03 00 00 00 00` → `…00 01 00 00` → `…00 02 00 00` | **byte 3 = boost hours** (0 = off) |
-| 0 | 100D | `00` → `01` → `02` → `03` | Override selector. Confirmed: `00` none, `01` Advance, `02` Boost 1 h, `03` Boost 2 h. Write the value to set it, `00` to cancel. Advance leaves 1001 untouched; boost also sets 1001 byte 3 = hours. (`04` = 3 h likely, untested.) |
+| `0002` | 3 | select | Element triacs |
+| `0003` | 2 | select | Relays. Relay 1 is the core element's: closed doesn't mean charging, because on a dual supply the element only gets power while the off-peak supply (`000E`) is live |
+| `0007` | 1 | read | Last panel key pressed |
+| `0008` | 3 | select | Temperatures: room, control board, storage core |
+| `000E` | 1 | read | Off-peak supply: `01` when it's live |
+| `100E` | 1 | read/write | Firmware update enable. Leave it alone |
+| `1020` | 1 | read/write | Factory test mode. Leave it alone |
 
-## Mode — register S0000/1001 `[01][mode][00][boost_hrs][00][00]`
+`0001` (`02 BE FF 9B`) and its read-only copy S3/`1029` never change, so they're not room temperature.
+Use `0008`.
 
-Byte 1 = operating mode (user-confirmed):
-- `01` = **Out All Day**
-- `03` = **User Timer**
-- `04` = **Holiday**
-- (`02` unseen — reserved, or Advance?)
+## Service 2: options
 
-These three are the only panel modes (Boost and Setback are separate states, not modes). So 1001 is the main control block: mode in byte 1, boost hours in byte 3.
-
-Setpoint behaviour: entering Holiday dropped both 1003 and 1023 from `14 00` (20) to `0a 00` (10), and 1004 byte 0 went `00`→`01`. So 1004 byte 2 (`0a` = 10) is the Holiday/frost target, 1004 byte 0 is the "holiday active" flag, and 1003/1023 hold the setpoint currently in force.
-
-Register 1 / 0003 went `01 00` → `01 01` with boost but stayed `01 01` after cancelling, so it isn't the boost flag. Possibly a "something changed on the panel" marker.
-
-Cancelling (No Boost) put 1001 byte 3 and 100D back to 0. 100D is the override selector: writing `01` starts Advance (confirmed by pressing Advance on the panel — 100D went `00`→`01`, nothing else of note changed), `02`/`03` start boost.
-
-## Open window detection (diff 2026-11-25: OW turned off)
-
-| Svc | Char | On → off | Meaning |
+| Char | Size | Access | What it is |
 |---|---|---|---|
-| 0 | 1007 | `01 00 00 00 00 00 00 00 00` → `00 …` | **byte 0 = Open Window detection** (1 = on, 0 = off) |
+| `0005` | 3 | read/write | Button sound: `[on][tone][volume]` |
+| `100C` | 1 | read/write | Radio link enabled |
+| `1019` | 1 | read/write | Room sensor offset: `00` none, `01` to `64` adds 0.1 to 10.0 °C, above `64` subtracts ((256 − value) / 10 °C) |
+| `101C` | 16 | read/write | Charge times: 4 × `[start h][start m][end h][end m]`, all zero when unset |
+| `101D` | 1 | read/write | Secondary (slave) heater |
+| `101E` | 1 | read/write | Additional charge, hours |
 
-## Live temperatures
+## Service 3: product
 
-Confirmed live 2026-11-25 against the diagnostic screen (OSD core F=44.9, room cluster C=19.5/18.7, E3=17.7):
-
-| Svc | Char | Decode | Meaning |
+| Char | Size | Access | What it is |
 |---|---|---|---|
-| 1 | 0008 | byte 1 = whole °C (read 44 vs OSD 44.9); tracked 52 boost → 45 → 44 cooling | **Core temperature °C** (byte 1, floored). byte 0 = 03 status, byte 2 wobbles |
-| 1 | 0001 | `02 be ff 9b` → byte 1 ÷10 = 19.0 (OSD room sensor 18.7–19.5) | **Room air temperature ×0.1 °C** (byte 1). byte 3 = another probe (15.5); `ff` byte = unused/invalid. Same 3 bytes echo in S0003/1029 |
-| 3 | 200C | `14 12 0c 0a 13` = 20,18,12,10,19 | Whole-°C bundle: comfort 20, room ~18, 12, frost 10, 19 |
-| 3 | 000A | `c8 0a …` → byte0 ÷10 = 20.0, byte1 = 10 | **Comfort setpoint 20.0** (byte0 ×0.1) + **frost 10** (byte1) — matches OSD row E |
+| `000A` | 8 | read | Element power, W: `u16` element 1, `u16` element 2. An SSHE125 reads 2760 and 0 |
+| `101B` | 1 | read | Heater size code |
+| `2001` | 3 | select | Software versions |
+| `2004` | 20 | read | Brand: `<Sunhouse>` |
+| `2005` | 6 | read | Model, for example `SSHE125;B;` |
+| `200A` | 6 | read | Board part number, for example `EP4078` |
+| `200D` | 8 | read | Hardware identifier, for example `SGLHS6` |
 
-To read temperatures: core = 0008 byte 1 (°C), room = 0001 byte 1 (÷10). 200C and 000A give whole-degree setpoints.
+`2006`, `2007` and `2008` can't be read or written.
 
-## Changes without a setting change
+## Fault codes (`1011`)
 
-| Svc | Char | Values seen | Notes |
-|---|---|---|---|
-| 1 | 000D | `31 61`, `31 5d`…`31 61` | **Probably a temperature sensor.** Rose with boost + higher setpoint, slowly settled. As byte0.byte1 ≈ 49.3–49.97 °C (0x31 = 49 whole degrees). Does NOT match the OSD core figure (44.5), so a different/hotter sensor (element?). Confirm by logging 000D against the OSD over a few minutes |
-| 1 | 0007 | `06` → `04` | Changed while the panel was being used; UI/menu state or heating demand? |
+| Code | Fault |
+|---|---|
+| 0 | None |
+| 20 | Thermistor failure |
+| 21 | Core thermistor failure |
+| 22 | Display thermistor failure |
+| 30 | Room too hot |
+| 32 | Display overheat |
+| 34 | Fan failure |
+| 40 | Internal comms failure |
+| 50 | Open window detected |
+| 52 | Heating disabled |
+| 53 | Clock lost (power cut) |
+| 60 | Wireless comms failure |
+| 62 | Charge control signal failure |
+| 63 | Charge times failure |
 
-## Strong guesses (need a diff to confirm)
+## Not worked out yet
 
-| Svc | Char | Raw | Guess |
-|---|---|---|---|
-| 0 | 1004 | `00 00 0a 00` | 10 → setback/frost temperature? (row D shows 10.0) |
-| 0 | 1001 | `01 03 00 00 00 00` | mode block? (User Timer) |
-| 3 | 1024 | `00 00 05 f5` | 0x05f5 = 1525 → element power (W)? |
-
-## 7-day timer schedule — NOT exposed over BLE
-
-Tested by changing Wed Period 1 (08:00→09:00) on the panel and diffing: **no readable characteristic changed**, and the schedule times appear in no register in any encoding (hour byte, minutes-since-midnight, quarter-hour). The `1002`/`1012`–`1015` zero blocks are not it. The only non-readable handles are the two OTA services (off-limits) and `2006`/`2007`/`2008`, which have empty properties (inert). **Conclusion: the User Timer schedule cannot be read or written over Bluetooth — panel only.**
-
-If you want scheduling, run it from something that stays on and write target temp (1003), mode (1001) and boost (100D) on your own timetable instead of using the heater's internal timer. Keep the heater in a steady mode and push the setpoints yourself.
-
-## Unknown
-
-Svc 0: 1002 (31 bytes, zero — timer table?), 1005, 1006 `07 00 1a 00`, 1007, 100D, 1011, 1012–1015 (10 bytes zero each — per-day timers?), 1016 `00 07`.
-Svc 1: 0001 `02 be ff 9b`, 0002 `03 00 03`, 0003 `01 00`, 0007 `06`, 0008 `03 32 07`, 0009, 000D `"1a"`, 000E, 100E, 1010 `0x47`, 1020.
-Svc 2: 0005 `01 00 00`, 100A `01`, 100B, 100C `01`, 100F, 1019, 101A (9 bytes), 101C (16 bytes), 101D, 101E `02`.
-Svc 3: 000A `c8 0a 00…`, 101B `03`, 1021 `02 05 07 0a`, 1022 `01`, 1025 `0x69`, 1029 `be ff 9b`, 1050 `ff d4 00`, 2002 `01 00 64 20 06 02`, 2003 `01 0a 00`, 2009 `05`, 200B `88 fa`, 200C `14 12 0c 0a 13 00`.
-2006 / 2007 / 2008 have no properties (not readable).
-
-Live temperatures (room 17.7, core 44.5 etc. on the diagnostic screen) do not show up as plain readable values yet.
+S1: `0009`, `000D` (changes on its own, probably another temperature), `1010`.
+S2: `100A`, `100B`, `100F`, `101A`.
+S3: `1021`, `1022`, `1024`, `1025`, `1050`, `2002`, `2003`, `2009`, `200B`, `200C` (a snapshot of setpoints
+that doesn't follow later changes).
