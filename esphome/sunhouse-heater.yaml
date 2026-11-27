@@ -232,6 +232,7 @@ sensor:
       if (x[0] == 1)
       {
           id(core_relay).publish_state(x[1] != 0);
+          id(charging).publish_state(id(core_relay).state && id(off_peak).state);
       }
 
       return static_cast<float>(x[0]);
@@ -251,6 +252,7 @@ sensor:
       }
 
       id(off_peak).publish_state(x[0] != 0);
+      id(charging).publish_state(id(core_relay).state && id(off_peak).state);
       return static_cast<float>(x[0]);
 
   - platform: ble_client
@@ -495,8 +497,6 @@ binary_sensor:
     name: Core element relay
     icon: mdi:electric-switch-closed
     entity_category: diagnostic
-    on_state:
-      - lambda: "id(charging).publish_state(id(core_relay).state && id(off_peak).state);"
 
   - platform: template
     id: charging
@@ -509,8 +509,6 @@ binary_sensor:
     name: Off-peak supply
     icon: mdi:transmission-tower
     device_class: power
-    on_state:
-      - lambda: "id(charging).publish_state(id(core_relay).state && id(off_peak).state);"
 
   - platform: template
     id: has_fault
@@ -781,6 +779,7 @@ script:
   # kept. Text that isn't a valid day is logged and the heater is left alone.
   - id: write_timer_day
     mode: queued
+    max_runs: 14   # room for every day at once; the default of 5 drops the rest
     parameters:
       timer_mode: int
       day: int
@@ -789,10 +788,19 @@ script:
       - lambda: |-
           const std::size_t index = (timer_mode == sunhouse_climate::WeeklyTimer::kUserTimer ? 0 : 7) + static_cast<std::size_t>(day);
           std::string error;
-          const auto record = sunhouse_climate::WeeklyTimer::BuildWrite(value, timer_mode, day, id(timer_days)[index], &error);
-          id(is_timer_write_ready) = record.has_value() && id(heater_connected).state;
+          const std::vector<uint8_t>& previous = id(timer_days)[index];
+          const auto record = sunhouse_climate::WeeklyTimer::BuildWrite(value, timer_mode, day, previous, &error);
 
-          if (!record)
+          // Everything after the read/write flag matches what the heater already holds
+          const bool isUnchanged = record && previous.size() == record->size() &&
+                                   std::equal(record->begin() + 1, record->end(), previous.begin() + 1);
+          id(is_timer_write_ready) = record.has_value() && !isUnchanged && id(heater_connected).state;
+
+          if (isUnchanged)
+          {
+              ESP_LOGD("sunhouse", "Timer day %d/%d already matches the heater; nothing sent", timer_mode, day);
+          }
+          else if (!record)
           {
               ESP_LOGW("sunhouse", "Timer day not sent: %s", error.c_str());
           }
