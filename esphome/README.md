@@ -81,6 +81,7 @@ Later updates go over Wi-Fi with the same `esphome run sunhouse-heater.yaml`.
 | Thermostat | Room temperature, target temperature (whole degrees), and the heater's modes as presets: Out All Day, User Timer, Holiday |
 | Target temperature, Heater mode | The same controls on their own |
 | Boost | Off, 1 hour or 2 hours. *Boost ends* shows when it finishes |
+| Override | Normal, Boost 1 hour, Boost 2 hours, Advance or Holiday, as one choice. It shows what the heater is doing, and Normal cancels whatever's running |
 | Quick boost | A switch for one-tap boosting from a phone or widget: on is an hour, off cancels |
 | Advance | Runs the heater's output ahead of its schedule |
 | Holiday, Holiday days, Holiday ends | Frost protection until a return date. Set the days, then switch Holiday on. It ends by itself; switching it off ends it early and goes back to the mode you were in |
@@ -105,6 +106,13 @@ the heater, then read back, so the entry always shows what the heater kept. If t
 nothing is sent and the log says why.
 
 The timers are read again every 30 minutes, so changes made on the panel show up too.
+
+### Apple Home
+
+Through Home Assistant's HomeKit Bridge, the thermostat and *Override* make a tidy pair: Apple Home
+shows a select as one accessory with a button per option. Add `select` to the bridge's domains, and
+exclude *Heater mode*, *Boost* and the *Advance*, *Holiday* and *Quick boost* switches so they don't
+turn up twice. New accessories land in the bridge's room; move them in the Home app if that's wrong.
 
 ### On the ATOM
 

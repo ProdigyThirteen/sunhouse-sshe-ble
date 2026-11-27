@@ -396,6 +396,7 @@ sensor:
           id(last_boost_hours) = x[3];
       }
 
+      id(show_override).execute();
       return static_cast<float>(x[3]);
 
   # S0/1004: byte 0 is the days left of a Holiday, byte 2 the frost temperature.
@@ -483,6 +484,7 @@ sensor:
       }
 
       id(advance).publish_state(x[0] == 0x01);
+      id(show_override).execute();
       return static_cast<float>(x[0]);
 
   - platform: wifi_signal
@@ -663,6 +665,55 @@ select:
           else:
             - logger.log: { level: WARN, format: "The heater isn't connected, so the boost wasn't sent" }
 
+  # Boost, Advance and Holiday in one place, for Apple Home: it shows a select as one accessory
+  # with a button per option. Only one can run at a time, and Normal cancels whichever it is.
+  - platform: template
+    id: override
+    name: Override
+    icon: mdi:radiator
+    options: ["Normal", "Boost 1 hour", "Boost 2 hours", "Advance", "Holiday"]
+    optimistic: false
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Holiday";'
+          then:
+            - if:
+                condition:
+                  lambda: "return !id(holiday).state;"
+                then:
+                  - script.execute: start_holiday
+          else:
+            # Anything else ends a Holiday first
+            - if:
+                condition:
+                  lambda: "return id(holiday).state;"
+                then:
+                  - switch.turn_off: holiday
+                  - delay: 4s
+            - if:
+                condition:
+                  lambda: 'return x == "Boost 1 hour" || x == "Boost 2 hours";'
+                then:
+                  - select.set:
+                      id: boost
+                      option: !lambda 'return x == "Boost 1 hour" ? "1 hour" : "2 hours";'
+            - if:
+                condition:
+                  lambda: 'return x == "Advance";'
+                then:
+                  - script.execute: { id: write_advance, enable: true }
+            - if:
+                condition:
+                  lambda: 'return x == "Normal" && id(boost).current_option() != "Off";'
+                then:
+                  - select.set: { id: boost, option: "Off" }
+            - if:
+                condition:
+                  lambda: 'return x == "Normal" && id(advance).state;'
+                then:
+                  - script.execute: { id: write_advance, enable: false }
+
 switch:
   # On starts a Holiday (frost protection) for Holiday days; off goes back to the mode before it.
   - platform: template
@@ -714,6 +765,43 @@ switch:
       - script.execute: { id: write_advance, enable: false }
 
 script:
+  # What the Override select shows: Holiday over a boost over Advance, as the heater reports them.
+  - id: show_override
+    mode: queued
+    max_runs: 3
+    then:
+      - lambda: |-
+          const std::vector<uint8_t>& control = id(control_bytes);
+
+          if (control.size() < 4)
+          {
+              return;
+          }
+
+          const char* option = "Normal";
+
+          if (control[1] == 0x04)
+          {
+              option = "Holiday";
+          }
+          else if (control[3] == 1)
+          {
+              option = "Boost 1 hour";
+          }
+          else if (control[3] >= 2)
+          {
+              option = "Boost 2 hours";
+          }
+          else if (id(advance).state)
+          {
+              option = "Advance";
+          }
+
+          if (!id(override).has_state() || id(override).current_option() != option)
+          {
+              id(override).publish_state(option);
+          }
+
   # Room, then core.
   - id: read_temperatures
     mode: single
